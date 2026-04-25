@@ -73,7 +73,6 @@ createSchemaRestRouter(dbvg, pool, {
   version: "1.0.0",      // OpenAPI version
   cors: true,             // permissive CORS for browser apps
   policies: {
-    request: (ctx, route) => undefined,
     scope: (ctx, tableName, tableMeta) => ({ owner_id: ctx.state.user.id }),
     insert: (body, ctx, tableName, tableMeta) => ({ ...body, owner_id: ctx.state.user.id }),
   },
@@ -115,16 +114,11 @@ excludeTables: ["audit_*", "internal_*"]
 
 ### Authorization with `policies`
 
-Use `policies` to reject requests, scope generated queries, or transform inserts from your auth middleware:
+Use `policies` to scope generated queries from your auth middleware:
 
 ```js
 createSchemaRestRouter(dbvg, pool, {
   policies: {
-    request: async (ctx, route) => {
-      if (!ctx.state.user) {
-        return { status: 401, body: { error: "Unauthorized" } };
-      }
-    },
     // ctx.state.user was set by upstream JWT middleware
     scope: (ctx, tableName, tableMeta) => {
       if (!tableMeta.columns.owner_id) {
@@ -146,11 +140,10 @@ createSchemaRestRouter(dbvg, pool, {
 
 The policy hooks are global:
 
-- `request(ctx, route)` runs before generated route handlers and can return a response object to deny the request.
 - `scope(ctx, tableName, tableMeta)` returns column/value constraints that are added to generated `GET`, `PATCH`, and `DELETE` statements.
 - `insert(body, ctx, tableName, tableMeta)` returns the body to validate and insert, which lets server code force ownership fields instead of trusting clients.
 
-Route and data hooks receive table metadata, so one policy can decide which tables should be scoped.
+Both hooks also receive `tableName` and `tableMeta`, so one policy can decide which tables should be scoped.
 
 With the example above, list and item routes only see rows owned by the current user:
 
@@ -160,46 +153,6 @@ select * from "projects" where "id" = $1 and "owner_id" = $2
 ```
 
 Updates and deletes use the same ownership predicate. If a row exists but is not owned by the current user, item routes return `404` rather than revealing that the row exists.
-
-### Rate limiting
-
-Use `policies.request` to integrate whichever limiter you use in production. The hook receives route metadata so you can limit by table and action:
-
-```js
-const hits = new Map();
-
-createSchemaRestRouter(dbvg, pool, {
-  policies: {
-    request: async (ctx, route) => {
-      const windowMs = 60_000;
-      const limit = route.action === "list" ? 120 : 60;
-      const key = `${ctx.ip}:${route.tableName ?? "api"}:${route.action}`;
-      const now = Date.now();
-      const bucket = hits.get(key) ?? { count: 0, resetAt: now + windowMs };
-
-      if (bucket.resetAt <= now) {
-        bucket.count = 0;
-        bucket.resetAt = now + windowMs;
-      }
-
-      bucket.count += 1;
-      hits.set(key, bucket);
-
-      if (bucket.count > limit) {
-        return {
-          status: 429,
-          body: { error: "Too many requests" },
-          headers: {
-            "Retry-After": String(Math.ceil((bucket.resetAt - now) / 1000)),
-          },
-        };
-      }
-    },
-  },
-});
-```
-
-The `route.action` value is one of `list`, `read`, `insert`, `update`, `delete`, or `openapi`.
 
 ### OpenAPI spec
 

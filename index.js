@@ -70,7 +70,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
       throw new TypeError(`dbvg output is missing a row schema for table ${tableName}`);
     }
 
-    router.get(tablePath, requestPolicy(policies, { tableName, tableMeta, action: "list", method: "GET" }), async (ctx) => {
+    router.get(tablePath, async (ctx) => {
       const pageLimit = parseBoundedInteger(ctx.query.limit, limit, 1, maxLimit);
       const offset = parseBoundedInteger(ctx.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
       const scope = await policyScope(policies, ctx, tableMeta, tableName);
@@ -86,7 +86,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
       ctx.body = rowSchema.array().parse(normalizeRows(rows, tableMeta));
     });
 
-    router.get(`${tablePath}${pkPath}`, requestPolicy(policies, { tableName, tableMeta, action: "read", method: "GET" }), async (ctx) => {
+    router.get(`${tablePath}${pkPath}`, async (ctx) => {
       const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
       const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
       const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
@@ -103,11 +103,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
     });
 
     if (insertSchema) {
-      router.post(
-        tablePath,
-        requestPolicy(policies, { tableName, tableMeta, action: "insert", method: "POST" }),
-        validateBody(insertSchema, (ctx) => applyInsertPolicy(policies, ctx, tableName, tableMeta)),
-        async (ctx) => {
+      router.post(tablePath, validateBody(insertSchema, (ctx) => applyInsertPolicy(policies, ctx, tableName, tableMeta)), async (ctx) => {
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -126,16 +122,11 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
 
         ctx.status = 201;
         ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
-        },
-      );
+      });
     }
 
     if (updateSchema) {
-      router.patch(
-        `${tablePath}${pkPath}`,
-        requestPolicy(policies, { tableName, tableMeta, action: "update", method: "PATCH" }),
-        validateBody(updateSchema),
-        async (ctx) => {
+      router.patch(`${tablePath}${pkPath}`, validateBody(updateSchema), async (ctx) => {
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -161,12 +152,11 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
         }
 
         ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
-        },
-      );
+      });
     }
 
     if (!isView) {
-      router.delete(`${tablePath}${pkPath}`, requestPolicy(policies, { tableName, tableMeta, action: "delete", method: "DELETE" }), async (ctx) => {
+      router.delete(`${tablePath}${pkPath}`, async (ctx) => {
         const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
         const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
         const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
@@ -180,7 +170,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
 
   const openApiSpec = buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, version });
 
-  router.get("/openapi.json", requestPolicy(policies, { action: "openapi", method: "GET" }), async (ctx) => {
+  router.get("/openapi.json", async (ctx) => {
     ctx.type = "application/json";
     ctx.body = openApiSpec;
   });
@@ -216,10 +206,6 @@ async function applyInsertPolicy(policies, ctx, tableName, tableMeta) {
 }
 
 function validatePolicies(policies) {
-  if (policies.request !== undefined && typeof policies.request !== "function") {
-    throw new TypeError("policies.request must be a function");
-  }
-
   if (policies.scope !== undefined && typeof policies.scope !== "function") {
     throw new TypeError("policies.scope must be a function");
   }
@@ -227,50 +213,6 @@ function validatePolicies(policies) {
   if (policies.insert !== undefined && typeof policies.insert !== "function") {
     throw new TypeError("policies.insert must be a function");
   }
-}
-
-function requestPolicy(policies, route) {
-  return async (ctx, next) => {
-    if (typeof policies.request !== "function") {
-      await next();
-      return;
-    }
-
-    const result = await policies.request(ctx, route);
-
-    if (result === undefined || result === null || result === true) {
-      await next();
-      return;
-    }
-
-    if (result === false) {
-      ctx.status = 403;
-      ctx.body = { error: "Forbidden" };
-      return;
-    }
-
-    if (!result || typeof result !== "object" || Array.isArray(result)) {
-      throw new TypeError("policies.request must return undefined, true, false, or a response object");
-    }
-
-    if (result.headers !== undefined) {
-      if (!result.headers || typeof result.headers !== "object" || Array.isArray(result.headers)) {
-        throw new TypeError("policies.request response headers must be an object");
-      }
-
-      for (const [name, value] of Object.entries(result.headers)) {
-        ctx.set(name, String(value));
-      }
-    }
-
-    ctx.status = result.status ?? 403;
-
-    if (Object.hasOwn(result, "body")) {
-      ctx.body = result.body;
-    } else {
-      ctx.body = { error: ctx.status === 429 ? "Too many requests" : "Forbidden" };
-    }
-  };
 }
 
 function corsMiddleware(config) {

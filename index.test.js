@@ -334,74 +334,6 @@ test("cors credentials reflect request origin when origin is wildcard", async ()
   assert.equal(response.headers["access-control-allow-credentials"], "true");
 });
 
-test("policies request can deny a generated route before querying", async () => {
-  const routes = [];
-  const app = createAppWithQueryAndOptions(dbvgOutput, {
-    async query() {
-      throw new Error("should not query when request policy denies");
-    },
-  }, {
-    policies: {
-      request: (ctx, route) => {
-        routes.push(route);
-        return {
-          status: 429,
-          body: { error: "Too many requests" },
-          headers: { "Retry-After": 60 },
-        };
-      },
-    },
-  });
-
-  const response = await request(app.callback()).get("/api/users").expect(429, { error: "Too many requests" });
-
-  assert.equal(response.headers["retry-after"], "60");
-  assert.equal(routes.length, 1);
-  assert.equal(routes[0].tableName, "users");
-  assert.equal(routes[0].action, "list");
-  assert.equal(routes[0].method, "GET");
-  assert.equal(routes[0].tableMeta, dbvgOutput.metadata.users);
-});
-
-test("policies request can deny with false shorthand", async () => {
-  const app = createAppWithOptions(dbvgOutput, {
-    policies: {
-      request: () => false,
-    },
-  });
-
-  await request(app.callback()).get("/api/users").expect(403, { error: "Forbidden" });
-});
-
-test("policies request allows openapi route metadata", async () => {
-  const routes = [];
-  const app = createAppWithOptions(dbvgOutput, {
-    policies: {
-      request: (ctx, route) => {
-        routes.push(route);
-      },
-    },
-  });
-
-  await request(app.callback()).get("/api/openapi.json").expect(200);
-
-  assert.deepEqual(routes, [{ action: "openapi", method: "GET" }]);
-});
-
-test("policies request runs before body validation", async () => {
-  const app = createAppWithQueryAndOptions(dbvgOutput, {
-    async query() {
-      throw new Error("should not query when request policy denies");
-    },
-  }, {
-    policies: {
-      request: () => ({ status: 429, body: { error: "Too many requests" } }),
-    },
-  });
-
-  await request(app.callback()).post("/api/users").send({ email: "not-an-email" }).expect(429, { error: "Too many requests" });
-});
-
 function createApp(queryable) {
   const app = new Koa();
   const router = createSchemaRestRouter(dbvgOutput, queryable);
@@ -483,13 +415,6 @@ test("throws when a policy hook is not a function", () => {
   assert.throws(
     () => createSchemaRestRouter(policyDbvgOutput, { async query() {} }, { policies: { scope: "not-a-function" } }),
     /policies.scope must be a function/,
-  );
-});
-
-test("throws when request policy is not a function", () => {
-  assert.throws(
-    () => createSchemaRestRouter(policyDbvgOutput, { async query() {} }, { policies: { request: "not-a-function" } }),
-    /policies.request must be a function/,
   );
 });
 
