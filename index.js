@@ -67,7 +67,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
       const offset = parseBoundedInteger(ctx.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
       const { rows } = await queryable.query(`select * from ${tableSql} limit $1 offset $2`, [pageLimit, offset]);
 
-      ctx.body = rowSchema.array().parse(rows);
+      ctx.body = rowSchema.array().parse(normalizeRows(rows, tableMeta));
     });
 
     router.get(`${tablePath}${pkPath}`, async (ctx) => {
@@ -80,7 +80,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
         return;
       }
 
-      ctx.body = rowSchema.parse(rows[0]);
+      ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
     });
 
     if (insertSchema) {
@@ -110,7 +110,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
         );
 
         ctx.status = 201;
-        ctx.body = rowSchema.parse(rows[0]);
+        ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
       });
     }
 
@@ -146,7 +146,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
           return;
         }
 
-        ctx.body = rowSchema.parse(rows[0]);
+        ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
       });
     }
 
@@ -453,6 +453,59 @@ function openApiTypeFromColumn(column) {
 function toPascalCase(value) {
   const camel = toCamelCase(value);
   return camel ? `${camel[0].toUpperCase()}${camel.slice(1)}` : "";
+}
+
+function normalizeRows(rows, tableMeta) {
+  return rows.map((row) => normalizeRow(row, tableMeta));
+}
+
+function normalizeRow(row, tableMeta) {
+  const numericColumns = numericColumnNames(tableMeta);
+  const numericArrayColumns = numericArrayColumnNames(tableMeta);
+
+  if (numericColumns.length === 0 && numericArrayColumns.length === 0) {
+    return row;
+  }
+
+  const normalized = { ...row };
+
+  for (const columnName of numericColumns) {
+    if (typeof normalized[columnName] === "string") {
+      normalized[columnName] = Number(normalized[columnName]);
+    }
+  }
+
+  for (const columnName of numericArrayColumns) {
+    if (Array.isArray(normalized[columnName])) {
+      normalized[columnName] = normalized[columnName].map((value) => (typeof value === "string" ? Number(value) : value));
+    }
+  }
+
+  return normalized;
+}
+
+function numericColumnNames(tableMeta) {
+  const columns = tableMeta?.columns;
+
+  if (!columns || typeof columns !== "object") {
+    return [];
+  }
+
+  return Object.entries(columns)
+    .filter(([, column]) => column?.dataType === "numeric" || column?.udtName === "numeric")
+    .map(([columnName]) => columnName);
+}
+
+function numericArrayColumnNames(tableMeta) {
+  const columns = tableMeta?.columns;
+
+  if (!columns || typeof columns !== "object") {
+    return [];
+  }
+
+  return Object.entries(columns)
+    .filter(([, column]) => column?.dataType === "ARRAY" && column?.udtName === "_numeric")
+    .map(([columnName]) => columnName);
 }
 
 function matchGlobs(names, patterns) {

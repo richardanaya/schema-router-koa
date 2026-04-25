@@ -106,6 +106,48 @@ test("returns validation errors from generated insert schemas", async () => {
   assert.ok(response.body.issues.length > 0);
 });
 
+test("normalizes PostgreSQL numeric strings before response validation", async () => {
+  const metricsOutput = {
+    rowSchemas: {
+      workout_summary: z.object({
+        id: z.number().int(),
+        score: z.number().nullable(),
+        scores: z.array(z.number()),
+        total_weight_time: z.union([z.bigint(), z.string()]).nullable(),
+      }),
+    },
+    metadata: {
+      workout_summary: {
+        view: true,
+        primaryKey: [],
+        columns: {
+          id: { dataType: "integer", udtName: "int4", nullable: false },
+          score: { dataType: "numeric", udtName: "numeric", nullable: true },
+          scores: { dataType: "ARRAY", udtName: "_numeric", nullable: false },
+          total_weight_time: { dataType: "bigint", udtName: "int8", nullable: true },
+        },
+      },
+    },
+  };
+
+  const app = new Koa();
+  const router = createKoaRestRouter(metricsOutput, {
+    async query() {
+      return {
+        rows: [{ id: 1, score: "1.25", scores: ["1.25", "2.5"], total_weight_time: "9007199254740993" }],
+        rowCount: 1,
+      };
+    },
+  });
+  app.use(bodyParser());
+  app.use(router.routes());
+  app.use(router.allowedMethods());
+
+  await request(app.callback()).get("/api/workout_summary").expect(200, [
+    { id: 1, score: 1.25, scores: [1.25, 2.5], total_weight_time: "9007199254740993" },
+  ]);
+});
+
 test("serves a cached openapi.json spec", async () => {
   const app = createApp({
     async query() {
