@@ -48,13 +48,14 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
       continue;
     }
 
+    const isView = tableMeta.view === true;
     const primaryKey = Array.isArray(tableMeta.primaryKey) ? tableMeta.primaryKey : [];
     const pkColumns = primaryKey.length > 0 ? primaryKey : ["id"];
     const tablePath = `/${encodePathSegment(tableName)}`;
     const pkPath = pkColumns.map((column) => `/:${paramName(column)}`).join("");
     const rowSchema = schemaFor(dbvgOutput, "rowSchemas", tableName, `${toCamelCase(tableName)}RowSchema`, `${toCamelCase(tableName)}Schema`);
-    const insertSchema = schemaFor(dbvgOutput, "insertSchemas", tableName, `${toCamelCase(tableName)}InsertSchema`);
-    const updateSchema = schemaFor(dbvgOutput, "updateSchemas", tableName, `${toCamelCase(tableName)}UpdateSchema`);
+    const insertSchema = isView ? null : schemaFor(dbvgOutput, "insertSchemas", tableName, `${toCamelCase(tableName)}InsertSchema`);
+    const updateSchema = isView ? null : schemaFor(dbvgOutput, "updateSchemas", tableName, `${toCamelCase(tableName)}UpdateSchema`);
     const tableSql = quoteIdentifier(tableName);
 
     if (!rowSchema) {
@@ -149,12 +150,14 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
       });
     }
 
-    router.delete(`${tablePath}${pkPath}`, async (ctx) => {
-      const { whereSql, values } = primaryKeyWhere(pkColumns, ctx.params);
-      const { rowCount } = await queryable.query(`delete from ${tableSql} where ${whereSql}`, values);
+    if (!isView) {
+      router.delete(`${tablePath}${pkPath}`, async (ctx) => {
+        const { whereSql, values } = primaryKeyWhere(pkColumns, ctx.params);
+        const { rowCount } = await queryable.query(`delete from ${tableSql} where ${whereSql}`, values);
 
-      ctx.status = rowCount > 0 ? 204 : 404;
-    });
+        ctx.status = rowCount > 0 ? 204 : 404;
+      });
+    }
   }
 
   const openApiSpec = buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, version });
@@ -245,6 +248,7 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
       continue;
     }
 
+    const isView = tableMeta.view === true;
     const primaryKey = Array.isArray(tableMeta.primaryKey) ? tableMeta.primaryKey : [];
     const pkColumns = primaryKey.length > 0 ? primaryKey : ["id"];
     const tablePath = `/${encodePathSegment(tableName)}`;
@@ -275,7 +279,10 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
           },
         },
       },
-      post: {
+    };
+
+    if (!isView) {
+      paths[tablePath].post = {
         operationId: `create${pascalName}`,
         summary: `Create ${tableName}`,
         requestBody: {
@@ -289,11 +296,11 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
           },
           400: { description: "Validation failed" },
         },
-      },
-    };
+      };
 
-    schemas[`${pascalName}Insert`] = openApiInsertSchemaFromColumns(tableMeta.columns, pkColumns);
-    schemas[`${pascalName}Update`] = openApiUpdateSchemaFromColumns(tableMeta.columns, pkColumns);
+      schemas[`${pascalName}Insert`] = openApiInsertSchemaFromColumns(tableMeta.columns, pkColumns);
+      schemas[`${pascalName}Update`] = openApiUpdateSchemaFromColumns(tableMeta.columns, pkColumns);
+    }
 
     paths[`${tablePath}${pkPath}`] = {
       get: {
@@ -308,7 +315,10 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
           404: { description: "Not found" },
         },
       },
-      patch: {
+    };
+
+    if (!isView) {
+      paths[`${tablePath}${pkPath}`].patch = {
         operationId: `update${pascalName}`,
         summary: `Update ${tableName}`,
         parameters: pkParameters,
@@ -324,8 +334,9 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
           400: { description: "Validation failed" },
           404: { description: "Not found" },
         },
-      },
-      delete: {
+      };
+
+      paths[`${tablePath}${pkPath}`].delete = {
         operationId: `delete${pascalName}`,
         summary: `Delete ${tableName}`,
         parameters: pkParameters,
@@ -333,8 +344,8 @@ function buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, 
           204: { description: "Deleted" },
           404: { description: "Not found" },
         },
-      },
-    };
+      };
+    }
   }
 
   return {
