@@ -71,35 +71,11 @@ createSchemaRestRouter(dbvg, pool, {
   excludeTables: [],     // glob patterns for tables to hide
   title: "My API",       // OpenAPI title
   version: "1.0.0",      // OpenAPI version
-  cors: true,             // permissive CORS for browser apps
   policies: {
     scope: (ctx, tableName, tableMeta) => ({ owner_id: ctx.state.user.id }),
     insert: (body, ctx, tableName, tableMeta) => ({ ...body, owner_id: ctx.state.user.id }),
   },
 });
-```
-
-### Permissive CORS
-
-Pass `cors: true` to allow browser clients from any origin and answer preflight requests automatically:
-
-```js
-const api = createSchemaRestRouter(dbvg, pool, {
-  prefix: "/api",
-  cors: true,
-});
-```
-
-For tighter control, pass an object:
-
-```js
-cors: {
-  origin: "https://app.example.com",
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  headers: ["Content-Type", "Authorization"],
-  credentials: true,
-  maxAge: 86400,
-}
 ```
 
 ### Exposing only some tables

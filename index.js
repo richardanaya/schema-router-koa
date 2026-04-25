@@ -27,7 +27,6 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
     title = "REST API",
     version = "1.0.0",
     policies = {},
-    cors = false,
   } = options;
 
   if (!policies || typeof policies !== "object" || Array.isArray(policies)) {
@@ -44,12 +43,6 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
   validatePatternsMatchTables(tables, allTableNames, "tables");
   validatePatternsMatchTables(excludeTables, allTableNames, "excludeTables");
   validatePolicies(policies);
-
-  if (cors) {
-    const corsOptions = normalizeCorsOptions(cors);
-    router.use(corsMiddleware(corsOptions));
-    router.options("/:path(.*)", corsPreflightHandler(corsOptions));
-  }
 
   for (const [tableName, tableMeta] of Object.entries(metadata)) {
     if (!tableSet.has(tableName)) {
@@ -213,76 +206,6 @@ function validatePolicies(policies) {
   if (policies.insert !== undefined && typeof policies.insert !== "function") {
     throw new TypeError("policies.insert must be a function");
   }
-}
-
-function corsMiddleware(config) {
-  return async (ctx, next) => {
-    setCorsHeaders(ctx, config);
-    await next();
-  };
-}
-
-function corsPreflightHandler(config) {
-  return (ctx) => {
-    setCorsHeaders(ctx, config);
-    ctx.status = 204;
-  };
-}
-
-function setCorsHeaders(ctx, config) {
-  const requestOrigin = ctx.get("Origin");
-  const origin = config.credentials && config.origin === "*" ? requestOrigin : config.origin;
-
-  if (origin) {
-    ctx.set("Access-Control-Allow-Origin", origin);
-  }
-
-  ctx.set("Access-Control-Allow-Methods", config.methods.join(", "));
-  ctx.set("Access-Control-Allow-Headers", config.headers.join(", "));
-
-  if (config.credentials) {
-    ctx.set("Access-Control-Allow-Credentials", "true");
-  }
-
-  if (config.maxAge !== undefined) {
-    ctx.set("Access-Control-Max-Age", String(config.maxAge));
-  }
-}
-
-function normalizeCorsOptions(cors) {
-  if (cors === true) {
-    return {
-      origin: "*",
-      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      headers: ["Content-Type", "Authorization"],
-      credentials: false,
-      maxAge: undefined,
-    };
-  }
-
-  if (!cors || typeof cors !== "object" || Array.isArray(cors)) {
-    throw new TypeError("cors must be true or an object");
-  }
-
-  return {
-    origin: cors.origin ?? "*",
-    methods: normalizeStringList(cors.methods ?? ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], "cors.methods"),
-    headers: normalizeStringList(cors.headers ?? ["Content-Type", "Authorization"], "cors.headers"),
-    credentials: cors.credentials === true,
-    maxAge: cors.maxAge,
-  };
-}
-
-function normalizeStringList(value, name) {
-  if (typeof value === "string") {
-    return [value];
-  }
-
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new TypeError(`${name} must be a string or an array of strings`);
-  }
-
-  return value;
 }
 
 async function policyScope(policies, ctx, tableMeta, tableName, placeholderOffset = 0) {
