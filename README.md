@@ -1,4 +1,4 @@
-# dbvg-rest-koa
+# schema-router-koa
 
 Zero-code Koa REST routes from a [database-validator-generator](https://github.com/richardanaya/database-validator-generator) schema.
 
@@ -13,7 +13,7 @@ If you already have a `schemas.mjs` file generated from your PostgreSQL database
 ## Quick start
 
 ```sh
-npm install dbvg-rest-koa @koa/router koa koa-bodyparser pg zod
+npm install schema-router-koa @koa/router koa koa-bodyparser pg zod
 ```
 
 ```js
@@ -21,7 +21,7 @@ import Koa from "koa";
 import bodyParser from "koa-bodyparser";
 import pg from "pg";
 import * as dbvg from "./schemas.mjs";
-import { createKoaRestRouter } from "dbvg-rest-koa";
+import { createKoaRestRouter } from "schema-router-koa";
 
 const app = new Koa();
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });

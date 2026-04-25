@@ -1,7 +1,7 @@
 {
-  "name": "dbvg-rest-koa",
+  "name": "schema-router-koa",
   "version": "0.0.0",
-  "description": "Generate Koa REST routes from database-validator-generator output.",
+  "description": "Generate Koa REST routes from database-validator-generator schema output.",
   "type": "module",
   "exports": {
     ".": "./index.js"
