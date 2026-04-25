@@ -1,0 +1,55 @@
+{
+  "name": "dbvg-rest-koa",
+  "version": "0.0.0",
+  "description": "Generate Koa REST routes from database-validator-generator output.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check ./index.js",
+    "test": "node --test",
+    "prepack": "npm run check && npm test"
+  },
+  "keywords": [
+    "koa",
+    "rest",
+    "postgres",
+    "dbvg",
+    "zod",
+    "database-validator-generator"
+  ],
+  "dependencies": {
+    "@koa/router": "^13.1.0"
+  },
+  "peerDependencies": {
+    "koa": "^2.15.0 || ^3.0.0",
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "koa": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "koa": "^2.16.1",
+    "koa-bodyparser": "^4.4.1",
+    "supertest": "^7.1.1",
+    "zod": "^4.3.6"
+  }
+}
