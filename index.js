@@ -27,6 +27,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
     title = "REST API",
     version = "1.0.0",
     policies = {},
+    cors = false,
   } = options;
 
   if (!policies || typeof policies !== "object" || Array.isArray(policies)) {
@@ -43,6 +44,12 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
   validatePatternsMatchTables(tables, allTableNames, "tables");
   validatePatternsMatchTables(excludeTables, allTableNames, "excludeTables");
   validatePolicies(policies);
+
+  if (cors) {
+    const corsOptions = normalizeCorsOptions(cors);
+    router.use(corsMiddleware(corsOptions));
+    router.options("/:path(.*)", corsPreflightHandler(corsOptions));
+  }
 
   for (const [tableName, tableMeta] of Object.entries(metadata)) {
     if (!tableSet.has(tableName)) {
@@ -63,7 +70,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
       throw new TypeError(`dbvg output is missing a row schema for table ${tableName}`);
     }
 
-    router.get(tablePath, async (ctx) => {
+    router.get(tablePath, requestPolicy(policies, { tableName, tableMeta, action: "list", method: "GET" }), async (ctx) => {
       const pageLimit = parseBoundedInteger(ctx.query.limit, limit, 1, maxLimit);
       const offset = parseBoundedInteger(ctx.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
       const scope = await policyScope(policies, ctx, tableMeta, tableName);
@@ -79,7 +86,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
       ctx.body = rowSchema.array().parse(normalizeRows(rows, tableMeta));
     });
 
-    router.get(`${tablePath}${pkPath}`, async (ctx) => {
+    router.get(`${tablePath}${pkPath}`, requestPolicy(policies, { tableName, tableMeta, action: "read", method: "GET" }), async (ctx) => {
       const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
       const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
       const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
@@ -96,7 +103,11 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
     });
 
     if (insertSchema) {
-      router.post(tablePath, validateBody(insertSchema, (ctx) => applyInsertPolicy(policies, ctx, tableName, tableMeta)), async (ctx) => {
+      router.post(
+        tablePath,
+        requestPolicy(policies, { tableName, tableMeta, action: "insert", method: "POST" }),
+        validateBody(insertSchema, (ctx) => applyInsertPolicy(policies, ctx, tableName, tableMeta)),
+        async (ctx) => {
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -115,11 +126,16 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
 
         ctx.status = 201;
         ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
-      });
+        },
+      );
     }
 
     if (updateSchema) {
-      router.patch(`${tablePath}${pkPath}`, validateBody(updateSchema), async (ctx) => {
+      router.patch(
+        `${tablePath}${pkPath}`,
+        requestPolicy(policies, { tableName, tableMeta, action: "update", method: "PATCH" }),
+        validateBody(updateSchema),
+        async (ctx) => {
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -145,11 +161,12 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
         }
 
         ctx.body = rowSchema.parse(normalizeRow(rows[0], tableMeta));
-      });
+        },
+      );
     }
 
     if (!isView) {
-      router.delete(`${tablePath}${pkPath}`, async (ctx) => {
+      router.delete(`${tablePath}${pkPath}`, requestPolicy(policies, { tableName, tableMeta, action: "delete", method: "DELETE" }), async (ctx) => {
         const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
         const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
         const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
@@ -163,7 +180,7 @@ export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
 
   const openApiSpec = buildOpenApiSpec(metadata, tableSet, { prefix, limit, maxLimit, title, version });
 
-  router.get("/openapi.json", async (ctx) => {
+  router.get("/openapi.json", requestPolicy(policies, { action: "openapi", method: "GET" }), async (ctx) => {
     ctx.type = "application/json";
     ctx.body = openApiSpec;
   });
@@ -199,6 +216,10 @@ async function applyInsertPolicy(policies, ctx, tableName, tableMeta) {
 }
 
 function validatePolicies(policies) {
+  if (policies.request !== undefined && typeof policies.request !== "function") {
+    throw new TypeError("policies.request must be a function");
+  }
+
   if (policies.scope !== undefined && typeof policies.scope !== "function") {
     throw new TypeError("policies.scope must be a function");
   }
@@ -206,6 +227,120 @@ function validatePolicies(policies) {
   if (policies.insert !== undefined && typeof policies.insert !== "function") {
     throw new TypeError("policies.insert must be a function");
   }
+}
+
+function requestPolicy(policies, route) {
+  return async (ctx, next) => {
+    if (typeof policies.request !== "function") {
+      await next();
+      return;
+    }
+
+    const result = await policies.request(ctx, route);
+
+    if (result === undefined || result === null || result === true) {
+      await next();
+      return;
+    }
+
+    if (result === false) {
+      ctx.status = 403;
+      ctx.body = { error: "Forbidden" };
+      return;
+    }
+
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      throw new TypeError("policies.request must return undefined, true, false, or a response object");
+    }
+
+    if (result.headers !== undefined) {
+      if (!result.headers || typeof result.headers !== "object" || Array.isArray(result.headers)) {
+        throw new TypeError("policies.request response headers must be an object");
+      }
+
+      for (const [name, value] of Object.entries(result.headers)) {
+        ctx.set(name, String(value));
+      }
+    }
+
+    ctx.status = result.status ?? 403;
+
+    if (Object.hasOwn(result, "body")) {
+      ctx.body = result.body;
+    } else {
+      ctx.body = { error: ctx.status === 429 ? "Too many requests" : "Forbidden" };
+    }
+  };
+}
+
+function corsMiddleware(config) {
+  return async (ctx, next) => {
+    setCorsHeaders(ctx, config);
+    await next();
+  };
+}
+
+function corsPreflightHandler(config) {
+  return (ctx) => {
+    setCorsHeaders(ctx, config);
+    ctx.status = 204;
+  };
+}
+
+function setCorsHeaders(ctx, config) {
+  const requestOrigin = ctx.get("Origin");
+  const origin = config.credentials && config.origin === "*" ? requestOrigin : config.origin;
+
+  if (origin) {
+    ctx.set("Access-Control-Allow-Origin", origin);
+  }
+
+  ctx.set("Access-Control-Allow-Methods", config.methods.join(", "));
+  ctx.set("Access-Control-Allow-Headers", config.headers.join(", "));
+
+  if (config.credentials) {
+    ctx.set("Access-Control-Allow-Credentials", "true");
+  }
+
+  if (config.maxAge !== undefined) {
+    ctx.set("Access-Control-Max-Age", String(config.maxAge));
+  }
+}
+
+function normalizeCorsOptions(cors) {
+  if (cors === true) {
+    return {
+      origin: "*",
+      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      headers: ["Content-Type", "Authorization"],
+      credentials: false,
+      maxAge: undefined,
+    };
+  }
+
+  if (!cors || typeof cors !== "object" || Array.isArray(cors)) {
+    throw new TypeError("cors must be true or an object");
+  }
+
+  return {
+    origin: cors.origin ?? "*",
+    methods: normalizeStringList(cors.methods ?? ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], "cors.methods"),
+    headers: normalizeStringList(cors.headers ?? ["Content-Type", "Authorization"], "cors.headers"),
+    credentials: cors.credentials === true,
+    maxAge: cors.maxAge,
+  };
+}
+
+function normalizeStringList(value, name) {
+  if (typeof value === "string") {
+    return [value];
+  }
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`${name} must be a string or an array of strings`);
+  }
+
+  return value;
 }
 
 async function policyScope(policies, ctx, tableMeta, tableName, placeholderOffset = 0) {
