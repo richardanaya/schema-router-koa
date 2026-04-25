@@ -21,14 +21,14 @@ import Koa from "koa";
 import bodyParser from "koa-bodyparser";
 import pg from "pg";
 import * as dbvg from "./schemas.mjs";
-import { createKoaRestRouter } from "schema-router-koa";
+import { createSchemaRestRouter } from "schema-router-koa";
 
 const app = new Koa();
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 app.use(bodyParser());
 
-const api = createKoaRestRouter(dbvg, pool, { prefix: "/api" });
+const api = createSchemaRestRouter(dbvg, pool, { prefix: "/api" });
 app.use(api.routes());
 app.use(api.allowedMethods());
 
@@ -63,7 +63,7 @@ This package consumes the generated contract (`metadata`, `rowSchemas`, `insertS
 ## Options
 
 ```js
-createKoaRestRouter(dbvg, pool, {
+createSchemaRestRouter(dbvg, pool, {
   prefix: "/api",        // route prefix
   limit: 50,             // default page size
   maxLimit: 500,         // max allowed ?limit=
@@ -71,8 +71,9 @@ createKoaRestRouter(dbvg, pool, {
   excludeTables: [],     // glob patterns for tables to hide
   title: "My API",       // OpenAPI title
   version: "1.0.0",      // OpenAPI version
-  intercept: async (body, schema, ctx) => {
-    // authorization hook: runs after validation, before database
+  policies: {
+    scope: (ctx, tableName, tableMeta) => ({ owner_id: ctx.state.user.id }),
+    insert: (body, ctx, tableName, tableMeta) => ({ ...body, owner_id: ctx.state.user.id }),
   },
 });
 ```
@@ -87,29 +88,47 @@ tables: ["users", "projects", "tasks"]
 excludeTables: ["audit_*", "internal_*"]
 ```
 
-### Authorization with `intercept`
+### Authorization with `policies`
 
-Use `intercept` to enforce ownership or role checks from your auth middleware:
+Use `policies` to scope generated queries from your auth middleware:
 
 ```js
-createKoaRestRouter(dbvg, pool, {
-  intercept: async (body, schema, ctx) => {
+createSchemaRestRouter(dbvg, pool, {
+  policies: {
     // ctx.state.user was set by upstream JWT middleware
-    if (schema === dbvg.insertSchemas.projects && body.owner_id !== ctx.state.user.id) {
-      ctx.status = 403;
-      ctx.body = { error: "You can only create your own projects" };
-    }
+    scope: (ctx, tableName, tableMeta) => {
+      if (!tableMeta.columns.owner_id) {
+        return {};
+      }
+
+      return { owner_id: ctx.state.user.id };
+    },
+    insert: (body, ctx, tableName, tableMeta) => {
+      if (!tableMeta.columns.owner_id) {
+        return body;
+      }
+
+      return { ...body, owner_id: ctx.state.user.id };
+    },
   },
 });
 ```
 
-The hook receives:
+The policy hooks are global:
 
-- `body` — the Zod-validated JSON body
-- `schema` — the Zod schema that validated it (useful for `===` checks)
-- `ctx` — the full Koa context
+- `scope(ctx, tableName, tableMeta)` returns column/value constraints that are added to generated `GET`, `PATCH`, and `DELETE` statements.
+- `insert(body, ctx, tableName, tableMeta)` returns the body to validate and insert, which lets server code force ownership fields instead of trusting clients.
 
-Set `ctx.status` and `ctx.body` inside `intercept` to reject a request early. The database is never touched if you do.
+Both hooks also receive `tableName` and `tableMeta`, so one policy can decide which tables should be scoped.
+
+With the example above, list and item routes only see rows owned by the current user:
+
+```sql
+select * from "projects" where "owner_id" = $1 limit $2 offset $3
+select * from "projects" where "id" = $1 and "owner_id" = $2
+```
+
+Updates and deletes use the same ownership predicate. If a row exists but is not owned by the current user, item routes return `404` rather than revealing that the row exists.
 
 ### OpenAPI spec
 

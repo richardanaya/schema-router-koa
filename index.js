@@ -3,13 +3,13 @@ import Router from "@koa/router";
 const DEFAULT_LIMIT = 50;
 const DEFAULT_MAX_LIMIT = 500;
 
-export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
+export function createSchemaRestRouter(dbvgOutput, queryable, options = {}) {
   if (!dbvgOutput || typeof dbvgOutput !== "object") {
-    throw new TypeError("createKoaRestRouter requires the imported dbvg output module");
+    throw new TypeError("createSchemaRestRouter requires the imported dbvg output module");
   }
 
   if (!queryable || typeof queryable.query !== "function") {
-    throw new TypeError("createKoaRestRouter requires a Postgres client or pool with query(sql, params)");
+    throw new TypeError("createSchemaRestRouter requires a Postgres client or pool with query(sql, params)");
   }
 
   const metadata = dbvgOutput.metadata;
@@ -26,11 +26,11 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
     excludeTables = [],
     title = "REST API",
     version = "1.0.0",
-    intercept = null,
+    policies = {},
   } = options;
 
-  if (intercept !== null && typeof intercept !== "function") {
-    throw new TypeError("intercept must be a function");
+  if (!policies || typeof policies !== "object" || Array.isArray(policies)) {
+    throw new TypeError("policies must be an object");
   }
 
   const router = new Router({ prefix });
@@ -42,6 +42,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
 
   validatePatternsMatchTables(tables, allTableNames, "tables");
   validatePatternsMatchTables(excludeTables, allTableNames, "excludeTables");
+  validatePolicies(policies);
 
   for (const [tableName, tableMeta] of Object.entries(metadata)) {
     if (!tableSet.has(tableName)) {
@@ -65,13 +66,24 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
     router.get(tablePath, async (ctx) => {
       const pageLimit = parseBoundedInteger(ctx.query.limit, limit, 1, maxLimit);
       const offset = parseBoundedInteger(ctx.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-      const { rows } = await queryable.query(`select * from ${tableSql} limit $1 offset $2`, [pageLimit, offset]);
+      const scope = await policyScope(policies, ctx, tableMeta, tableName);
+      const values = [...scope.values, pageLimit, offset];
+      const limitPlaceholder = `$${scope.values.length + 1}`;
+      const offsetPlaceholder = `$${scope.values.length + 2}`;
+      const whereClause = scope.whereSql ? ` where ${scope.whereSql}` : "";
+      const { rows } = await queryable.query(
+        `select * from ${tableSql}${whereClause} limit ${limitPlaceholder} offset ${offsetPlaceholder}`,
+        values,
+      );
 
       ctx.body = rowSchema.array().parse(normalizeRows(rows, tableMeta));
     });
 
     router.get(`${tablePath}${pkPath}`, async (ctx) => {
-      const { whereSql, values } = primaryKeyWhere(pkColumns, ctx.params);
+      const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
+      const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
+      const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
+      const values = [...pkWhere.values, ...scope.values];
       const { rows } = await queryable.query(`select * from ${tableSql} where ${whereSql}`, values);
 
       if (!rows[0]) {
@@ -84,15 +96,7 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
     });
 
     if (insertSchema) {
-      router.post(tablePath, validateBody(insertSchema), async (ctx) => {
-        if (intercept) {
-          await intercept(ctx.validatedBody, insertSchema, ctx);
-
-          if (ctx.body !== undefined) {
-            return;
-          }
-        }
-
+      router.post(tablePath, validateBody(insertSchema, (ctx) => applyInsertPolicy(policies, ctx, tableName, tableMeta)), async (ctx) => {
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -116,14 +120,6 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
 
     if (updateSchema) {
       router.patch(`${tablePath}${pkPath}`, validateBody(updateSchema), async (ctx) => {
-        if (intercept) {
-          await intercept(ctx.validatedBody, updateSchema, ctx);
-
-          if (ctx.body !== undefined) {
-            return;
-          }
-        }
-
         const columns = Object.keys(ctx.validatedBody);
 
         if (columns.length === 0) {
@@ -134,10 +130,12 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
 
         const assignments = columns.map((column, index) => `${quoteIdentifier(column)} = $${index + 1}`).join(", ");
         const bodyValues = columns.map((column) => ctx.validatedBody[column]);
-        const { whereSql, values: pkValues } = primaryKeyWhere(pkColumns, ctx.params, bodyValues.length);
+        const pkWhere = primaryKeyWhere(pkColumns, ctx.params, bodyValues.length);
+        const scope = await policyScope(policies, ctx, tableMeta, tableName, bodyValues.length + pkWhere.values.length);
+        const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
         const { rows } = await queryable.query(
           `update ${tableSql} set ${assignments} where ${whereSql} returning *`,
-          [...bodyValues, ...pkValues],
+          [...bodyValues, ...pkWhere.values, ...scope.values],
         );
 
         if (!rows[0]) {
@@ -152,7 +150,10 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
 
     if (!isView) {
       router.delete(`${tablePath}${pkPath}`, async (ctx) => {
-        const { whereSql, values } = primaryKeyWhere(pkColumns, ctx.params);
+        const pkWhere = primaryKeyWhere(pkColumns, ctx.params);
+        const scope = await policyScope(policies, ctx, tableMeta, tableName, pkWhere.values.length);
+        const whereSql = joinWhereSql(pkWhere.whereSql, scope.whereSql);
+        const values = [...pkWhere.values, ...scope.values];
         const { rowCount } = await queryable.query(`delete from ${tableSql} where ${whereSql}`, values);
 
         ctx.status = rowCount > 0 ? 204 : 404;
@@ -170,9 +171,10 @@ export function createKoaRestRouter(dbvgOutput, queryable, options = {}) {
   return router;
 }
 
-function validateBody(schema) {
+function validateBody(schema, transformBody = null) {
   return async (ctx, next) => {
-    const result = await schema.safeParseAsync(ctx.request.body);
+    const body = transformBody ? await transformBody(ctx) : ctx.request.body;
+    const result = await schema.safeParseAsync(body);
 
     if (!result.success) {
       ctx.status = 400;
@@ -186,6 +188,53 @@ function validateBody(schema) {
     ctx.validatedBody = result.data;
     await next();
   };
+}
+
+async function applyInsertPolicy(policies, ctx, tableName, tableMeta) {
+  if (typeof policies.insert !== "function") {
+    return ctx.request.body;
+  }
+
+  return policies.insert(ctx.request.body, ctx, tableName, tableMeta);
+}
+
+function validatePolicies(policies) {
+  if (policies.scope !== undefined && typeof policies.scope !== "function") {
+    throw new TypeError("policies.scope must be a function");
+  }
+
+  if (policies.insert !== undefined && typeof policies.insert !== "function") {
+    throw new TypeError("policies.insert must be a function");
+  }
+}
+
+async function policyScope(policies, ctx, tableMeta, tableName, placeholderOffset = 0) {
+  if (typeof policies.scope !== "function") {
+    return { whereSql: "", values: [] };
+  }
+
+  const scope = await policies.scope(ctx, tableName, tableMeta);
+
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    throw new TypeError("policies.scope must return an object");
+  }
+
+  const entries = Object.entries(scope);
+
+  for (const [column] of entries) {
+    if (!tableMeta.columns || !Object.hasOwn(tableMeta.columns, column)) {
+      throw new TypeError(`policy scope for table ${tableName} references unknown column ${column}`);
+    }
+  }
+
+  return {
+    whereSql: entries.map(([column], index) => `${quoteIdentifier(column)} = $${placeholderOffset + index + 1}`).join(" and "),
+    values: entries.map(([, value]) => value),
+  };
+}
+
+function joinWhereSql(...parts) {
+  return parts.filter(Boolean).join(" and ");
 }
 
 function schemaFor(dbvgOutput, registryName, tableName, ...exportNames) {

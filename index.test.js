@@ -4,7 +4,7 @@ import Koa from "koa";
 import bodyParser from "koa-bodyparser";
 import request from "supertest";
 import { z } from "zod";
-import { createKoaRestRouter } from "./index.js";
+import { createSchemaRestRouter } from "./index.js";
 
 const usersRowSchema = z.object({
   id: z.number().int(),
@@ -34,6 +34,37 @@ const dbvgOutput = {
       columns: {
         id: { nullable: false, primaryKey: true },
         email: { nullable: false },
+        name: { nullable: false },
+      },
+    },
+  },
+};
+
+const policyDbvgOutput = {
+  rowSchemas: {
+    items: z.object({
+      id: z.number().int(),
+      owner_id: z.number().int(),
+      name: z.string(),
+    }),
+  },
+  insertSchemas: {
+    items: z.object({
+      owner_id: z.number().int(),
+      name: z.string(),
+    }),
+  },
+  updateSchemas: {
+    items: z.object({
+      name: z.string().optional(),
+    }),
+  },
+  metadata: {
+    items: {
+      primaryKey: ["id"],
+      columns: {
+        id: { nullable: false, primaryKey: true },
+        owner_id: { nullable: false },
         name: { nullable: false },
       },
     },
@@ -131,7 +162,7 @@ test("normalizes PostgreSQL numeric strings before response validation", async (
   };
 
   const app = new Koa();
-  const router = createKoaRestRouter(metricsOutput, {
+  const router = createSchemaRestRouter(metricsOutput, {
     async query() {
       return {
         rows: [{ id: 1, score: "1.25", scores: ["1.25", "2.5"], total_weight_time: "9007199254740993" }],
@@ -218,21 +249,21 @@ test("excludeTables option filters out matched tables", async () => {
 
 test("throws when tables pattern matches nothing", () => {
   assert.throws(
-    () => createKoaRestRouter(dbvgOutput, { async query() {} }, { tables: ["nonexistent_*"] }),
+    () => createSchemaRestRouter(dbvgOutput, { async query() {} }, { tables: ["nonexistent_*"] }),
     /Pattern "nonexistent_\*" in tables does not match any table/,
   );
 });
 
 test("throws when excludeTables pattern matches nothing", () => {
   assert.throws(
-    () => createKoaRestRouter(dbvgOutput, { async query() {} }, { excludeTables: ["nonexistent_*"] }),
+    () => createSchemaRestRouter(dbvgOutput, { async query() {} }, { excludeTables: ["nonexistent_*"] }),
     /Pattern "nonexistent_\*" in excludeTables does not match any table/,
   );
 });
 
 function createApp(queryable) {
   const app = new Koa();
-  const router = createKoaRestRouter(dbvgOutput, queryable);
+  const router = createSchemaRestRouter(dbvgOutput, queryable);
 
   app.use(bodyParser());
   app.use(router.routes());
@@ -241,91 +272,81 @@ function createApp(queryable) {
   return app;
 }
 
-test("intercept receives validated body, schema, and ctx on insert", async () => {
-  const interceptCalls = [];
+test("policies scope list, read, update, and delete queries", async () => {
+  const queries = [];
+  const app = createAppWithQueryAndOptions(policyDbvgOutput, {
+    async query(sql, params) {
+      queries.push({ sql, params });
 
-  const app = createAppWithOptions(dbvgOutput, {
-    intercept(validatedBody, schema, ctx) {
-      interceptCalls.push({ validatedBody, schema, hasCtx: !!ctx, state: ctx.state });
-    },
-  });
-
-  await request(app.callback())
-    .post("/api/users")
-    .send({ email: "new@example.com", name: "New" })
-    .expect(201);
-
-  assert.equal(interceptCalls.length, 1);
-  assert.equal(interceptCalls[0].validatedBody.email, "new@example.com");
-  assert.equal(interceptCalls[0].validatedBody.name, "New");
-  assert.equal(interceptCalls[0].hasCtx, true);
-});
-
-test("intercept can reject inserts before database call", async () => {
-  const app = createAppWithOptions(dbvgOutput, {
-    intercept(body, schema, ctx) {
-      if (body.email === "blocked@example.com") {
-        ctx.status = 403;
-        ctx.body = { error: "Not authorized" };
-        return;
+      if (sql.startsWith("select * from")) {
+        return { rows: [{ id: 1, owner_id: 7, name: "Owned" }], rowCount: 1 };
       }
+
+      if (sql.startsWith("update")) {
+        return { rows: [{ id: 1, owner_id: 7, name: params[0] }], rowCount: 1 };
+      }
+
+      if (sql.startsWith("delete")) {
+        return { rows: [], rowCount: 1 };
+      }
+
+      return { rows: [], rowCount: 0 };
     },
+  }, policyOptions());
+
+  await request(app.callback()).get("/api/items?limit=10&offset=5").expect(200, [{ id: 1, owner_id: 7, name: "Owned" }]);
+  await request(app.callback()).get("/api/items/1").expect(200, { id: 1, owner_id: 7, name: "Owned" });
+  await request(app.callback()).patch("/api/items/1").send({ name: "Updated" }).expect(200, {
+    id: 1,
+    owner_id: 7,
+    name: "Updated",
   });
+  await request(app.callback()).delete("/api/items/1").expect(204);
 
-  const blocked = await request(app.callback())
-    .post("/api/users")
-    .send({ email: "blocked@example.com", name: "Blocked" })
-    .expect(403);
-
-  assert.equal(blocked.body.error, "Not authorized");
+  assert.deepEqual(queries, [
+    { sql: "select * from \"items\" where \"owner_id\" = $1 limit $2 offset $3", params: [7, 10, 5] },
+    { sql: "select * from \"items\" where \"id\" = $1 and \"owner_id\" = $2", params: ["1", 7] },
+    { sql: "update \"items\" set \"name\" = $1 where \"id\" = $2 and \"owner_id\" = $3 returning *", params: ["Updated", "1", 7] },
+    { sql: "delete from \"items\" where \"id\" = $1 and \"owner_id\" = $2", params: ["1", 7] },
+  ]);
 });
 
-test("invalid body does not reach intercept", async () => {
-  let interceptCalled = false;
-
-  const app = createAppWithOptions(dbvgOutput, {
-    intercept() {
-      interceptCalled = true;
+test("policies transform inserts before validation and database writes", async () => {
+  const queries = [];
+  const app = createAppWithQueryAndOptions(policyDbvgOutput, {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      return { rows: [{ id: 2, owner_id: params[0], name: params[1] }], rowCount: 1 };
     },
+  }, policyOptions());
+
+  await request(app.callback()).post("/api/items").send({ name: "New" }).expect(201, {
+    id: 2,
+    owner_id: 7,
+    name: "New",
   });
 
-  await request(app.callback())
-    .post("/api/users")
-    .send({ email: "not-an-email", name: "New" })
-    .expect(400);
-
-  assert.equal(interceptCalled, false);
+  assert.deepEqual(queries, [
+    { sql: "insert into \"items\" (\"owner_id\", \"name\") values ($1, $2) returning *", params: [7, "New"] },
+  ]);
 });
 
-test("intercept receives validated body on patch", async () => {
-  const interceptCalls = [];
-
-  const app = createAppWithOptions(dbvgOutput, {
-    intercept(body, schema, ctx) {
-      interceptCalls.push({ body, schema, pkId: ctx.params.pk_id });
-    },
-  });
-
-  await request(app.callback())
-    .patch("/api/users/1")
-    .send({ name: "Updated" })
-    .expect(200);
-
-  assert.equal(interceptCalls.length, 1);
-  assert.equal(interceptCalls[0].body.name, "Updated");
-  assert.equal(interceptCalls[0].pkId, "1");
-});
-
-test("throws when intercept is not a function", () => {
+test("throws when policies is not an object", () => {
   assert.throws(
-    () => createKoaRestRouter(dbvgOutput, { async query() {} }, { intercept: "not-a-function" }),
-    /intercept must be a function/,
+    () => createSchemaRestRouter(dbvgOutput, { async query() {} }, { policies: "not-an-object" }),
+    /policies must be an object/,
+  );
+});
+
+test("throws when a policy hook is not a function", () => {
+  assert.throws(
+    () => createSchemaRestRouter(policyDbvgOutput, { async query() {} }, { policies: { scope: "not-a-function" } }),
+    /policies.scope must be a function/,
   );
 });
 
 function createAppWithOptions(dbvg, options) {
-  const app = new Koa();
-  const router = createKoaRestRouter(dbvg, {
+  return createAppWithQueryAndOptions(dbvg, {
     async query(sql, params) {
       if (sql.startsWith("insert into")) {
         return { rows: [{ id: 2, email: params[0], name: params[1] }], rowCount: 1 };
@@ -336,10 +357,28 @@ function createAppWithOptions(dbvg, options) {
       return { rows: [], rowCount: 0 };
     },
   }, options);
+}
+
+function createAppWithQueryAndOptions(dbvg, queryable, options) {
+  const app = new Koa();
+  const router = createSchemaRestRouter(dbvg, queryable, options);
 
   app.use(bodyParser());
+  app.use(async (ctx, next) => {
+    ctx.state.user = { id: 7 };
+    await next();
+  });
   app.use(router.routes());
   app.use(router.allowedMethods());
 
   return app;
+}
+
+function policyOptions() {
+  return {
+    policies: {
+      scope: (ctx, tableName) => (tableName === "items" ? { owner_id: ctx.state.user.id } : {}),
+      insert: (body, ctx, tableName) => (tableName === "items" ? { ...body, owner_id: ctx.state.user.id } : body),
+    },
+  };
 }

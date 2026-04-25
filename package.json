@@ -1,6 +1,6 @@
 {
   "name": "schema-router-koa",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Generate Koa REST routes from database-validator-generator schema output.",
   "type": "module",
   "exports": {
